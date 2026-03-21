@@ -1,0 +1,569 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>ChaTube — YouTube RAG Q&A</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=DM+Sans:ital,wght@0,300;0,400;0,500;1,300&display=swap" rel="stylesheet">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:        #0a0a0f;
+      --surface:   #111118;
+      --border:    #1e1e2e;
+      --accent:    #e8ff47;
+      --accent2:   #47ffe8;
+      --muted:     #3a3a4e;
+      --text:      #e8e8f0;
+      --text-dim:  #6b6b88;
+      --danger:    #ff4747;
+      --radius:    12px;
+    }
+
+    html, body {
+      height: 100%;
+      background: var(--bg);
+      color: var(--text);
+      font-family: 'DM Sans', sans-serif;
+      font-size: 15px;
+      line-height: 1.6;
+      overflow-x: hidden;
+    }
+
+    /* ── noise grain overlay ── */
+    body::before {
+      content: '';
+      position: fixed; inset: 0;
+      background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.04'/%3E%3C/svg%3E");
+      pointer-events: none;
+      z-index: 0;
+    }
+
+    /* ── glowing blobs ── */
+    .blob {
+      position: fixed;
+      border-radius: 50%;
+      filter: blur(120px);
+      opacity: 0.12;
+      pointer-events: none;
+      z-index: 0;
+    }
+    .blob-1 { width: 500px; height: 500px; background: var(--accent); top: -150px; right: -100px; animation: drift 18s ease-in-out infinite alternate; }
+    .blob-2 { width: 400px; height: 400px; background: var(--accent2); bottom: -100px; left: -80px; animation: drift 22s ease-in-out infinite alternate-reverse; }
+
+    @keyframes drift {
+      from { transform: translate(0, 0) scale(1); }
+      to   { transform: translate(40px, 30px) scale(1.08); }
+    }
+
+    /* ── layout ── */
+    .wrapper {
+      position: relative;
+      z-index: 1;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 60px 20px 100px;
+    }
+
+    /* ── header ── */
+    header {
+      text-align: center;
+      margin-bottom: 56px;
+      animation: fadeUp 0.7s ease both;
+    }
+
+    .logo {
+      font-family: 'Bebas Neue', sans-serif;
+      font-size: clamp(52px, 9vw, 96px);
+      letter-spacing: 4px;
+      line-height: 1;
+      background: linear-gradient(135deg, var(--accent) 0%, var(--accent2) 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+    }
+
+    .tagline {
+      margin-top: 10px;
+      color: var(--text-dim);
+      font-size: 14px;
+      font-weight: 300;
+      letter-spacing: 2px;
+      text-transform: uppercase;
+    }
+
+    /* ── card ── */
+    .card {
+      width: 100%;
+      max-width: 720px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 20px;
+      padding: 40px;
+      animation: fadeUp 0.7s 0.15s ease both;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .card::before {
+      content: '';
+      position: absolute;
+      top: 0; left: 0; right: 0;
+      height: 2px;
+      background: linear-gradient(90deg, var(--accent), var(--accent2));
+      opacity: 0.6;
+    }
+
+    /* ── section labels ── */
+    .section-label {
+      font-size: 11px;
+      font-weight: 500;
+      letter-spacing: 2px;
+      text-transform: uppercase;
+      color: var(--text-dim);
+      margin-bottom: 10px;
+    }
+
+    /* ── url input row ── */
+    .url-row {
+      display: flex;
+      gap: 10px;
+      margin-bottom: 32px;
+    }
+
+    input[type="text"], textarea {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      color: var(--text);
+      border-radius: var(--radius);
+      padding: 14px 18px;
+      font-family: 'DM Sans', sans-serif;
+      font-size: 14px;
+      outline: none;
+      transition: border-color 0.2s, box-shadow 0.2s;
+      width: 100%;
+    }
+
+    input[type="text"]:focus, textarea:focus {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px rgba(232, 255, 71, 0.08);
+    }
+
+    input[type="text"]::placeholder, textarea::placeholder {
+      color: var(--muted);
+    }
+
+    /* ── button ── */
+    button {
+      cursor: pointer;
+      font-family: 'DM Sans', sans-serif;
+      font-weight: 500;
+      border: none;
+      border-radius: var(--radius);
+      transition: all 0.2s;
+    }
+
+    .btn-primary {
+      background: var(--accent);
+      color: #0a0a0f;
+      padding: 14px 24px;
+      font-size: 14px;
+      white-space: nowrap;
+      letter-spacing: 0.5px;
+    }
+
+    .btn-primary:hover { background: #f0ff6a; transform: translateY(-1px); }
+    .btn-primary:active { transform: translateY(0); }
+    .btn-primary:disabled { opacity: 0.4; cursor: not-allowed; transform: none; }
+
+    .btn-send {
+      background: var(--accent);
+      color: #0a0a0f;
+      padding: 14px 20px;
+      font-size: 14px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      flex-shrink: 0;
+    }
+    .btn-send:hover { background: #f0ff6a; }
+    .btn-send:disabled { opacity: 0.4; cursor: not-allowed; }
+
+    /* ── video loaded badge ── */
+    .video-badge {
+      display: none;
+      align-items: center;
+      gap: 8px;
+      background: rgba(232, 255, 71, 0.07);
+      border: 1px solid rgba(232, 255, 71, 0.2);
+      border-radius: 8px;
+      padding: 10px 14px;
+      margin-bottom: 28px;
+      font-size: 13px;
+      color: var(--accent);
+    }
+    .video-badge.visible { display: flex; }
+    .badge-dot { width: 7px; height: 7px; background: var(--accent); border-radius: 50%; animation: pulse 2s infinite; }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50%       { opacity: 0.3; }
+    }
+
+    /* ── divider ── */
+    .divider {
+      height: 1px;
+      background: var(--border);
+      margin: 28px 0;
+    }
+
+    /* ── Q&A section ── */
+    #qa-section {
+      display: none;
+    }
+    #qa-section.visible { display: block; }
+
+    .question-row {
+      display: flex;
+      gap: 10px;
+      align-items: flex-end;
+    }
+
+    textarea {
+      resize: none;
+      min-height: 54px;
+      max-height: 160px;
+      overflow-y: auto;
+      line-height: 1.5;
+    }
+
+    /* ── chat history ── */
+    #chat-history {
+      margin-top: 28px;
+      display: flex;
+      flex-direction: column;
+      gap: 20px;
+    }
+
+    .qa-pair { animation: fadeUp 0.4s ease both; }
+
+    .q-bubble, .a-bubble {
+      border-radius: var(--radius);
+      padding: 14px 18px;
+      font-size: 14px;
+      line-height: 1.65;
+    }
+
+    .q-bubble {
+      background: rgba(232, 255, 71, 0.06);
+      border: 1px solid rgba(232, 255, 71, 0.15);
+      color: var(--text);
+    }
+
+    .q-label, .a-label {
+      font-size: 10px;
+      font-weight: 500;
+      letter-spacing: 2px;
+      text-transform: uppercase;
+      margin-bottom: 6px;
+    }
+
+    .q-label { color: var(--accent); }
+    .a-label { color: var(--accent2); }
+
+    .a-bubble {
+      background: rgba(71, 255, 232, 0.04);
+      border: 1px solid rgba(71, 255, 232, 0.12);
+      color: var(--text);
+    }
+
+    /* ── generating state ── */
+    .generating-bar {
+      display: none;
+      align-items: center;
+      gap: 10px;
+      padding: 14px 18px;
+      border-radius: var(--radius);
+      background: rgba(71, 255, 232, 0.04);
+      border: 1px solid rgba(71, 255, 232, 0.12);
+      color: var(--text-dim);
+      font-size: 13px;
+      font-style: italic;
+    }
+    .generating-bar.visible { display: flex; }
+
+    .dot-wave { display: flex; gap: 4px; }
+    .dot-wave span {
+      width: 5px; height: 5px;
+      background: var(--accent2);
+      border-radius: 50%;
+      animation: wave 1.2s ease-in-out infinite;
+    }
+    .dot-wave span:nth-child(2) { animation-delay: 0.15s; }
+    .dot-wave span:nth-child(3) { animation-delay: 0.3s; }
+
+    @keyframes wave {
+      0%, 80%, 100% { transform: translateY(0); opacity: 0.4; }
+      40%            { transform: translateY(-6px); opacity: 1; }
+    }
+
+    /* ── error ── */
+    .error-msg {
+      color: var(--danger);
+      font-size: 13px;
+      margin-top: 8px;
+      display: none;
+    }
+    .error-msg.visible { display: block; }
+
+    /* ── animations ── */
+    @keyframes fadeUp {
+      from { opacity: 0; transform: translateY(18px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+
+    /* ── scrollbar ── */
+    ::-webkit-scrollbar { width: 6px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: var(--muted); border-radius: 3px; }
+
+    /* ── footer ── */
+    footer {
+      margin-top: 48px;
+      color: var(--text-dim);
+      font-size: 12px;
+      letter-spacing: 1px;
+      text-align: center;
+      animation: fadeUp 0.7s 0.3s ease both;
+    }
+
+    @media (max-width: 520px) {
+      .card { padding: 24px 20px; }
+      .url-row { flex-direction: column; }
+      .btn-primary { width: 100%; text-align: center; }
+    }
+  </style>
+</head>
+<body>
+
+<div class="blob blob-1"></div>
+<div class="blob blob-2"></div>
+
+<div class="wrapper">
+
+  <header>
+    <div class="logo">ChaTube</div>
+    <div class="tagline">Ask anything about any YouTube video</div>
+  </header>
+
+  <div class="card">
+
+    <!-- URL INPUT -->
+    <div class="section-label">YouTube Video URL</div>
+    <div class="url-row">
+      <input type="text" id="url-input"
+             placeholder="https://www.youtube.com/watch?v=..."
+             autocomplete="off" spellcheck="false"/>
+      <button class="btn-primary" id="load-btn" onclick="loadVideo()">Load</button>
+    </div>
+    <div class="error-msg" id="load-error"></div>
+
+    <!-- LOADED BADGE -->
+    <div class="video-badge" id="video-badge">
+      <span class="badge-dot"></span>
+      <span id="badge-text">Video loaded and ready</span>
+    </div>
+
+    <!-- DIVIDER + Q&A -->
+    <div id="qa-section">
+      <div class="divider"></div>
+      <div class="section-label">Ask a Question</div>
+      <div class="question-row">
+        <textarea id="question-input"
+                  placeholder="What is this video about?"
+                  rows="2"
+                  onkeydown="handleKey(event)"></textarea>
+        <button class="btn-send" id="ask-btn" onclick="askQuestion()">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+          Ask
+        </button>
+      </div>
+      <div class="error-msg" id="ask-error"></div>
+
+      <!-- Chat history -->
+      <div id="chat-history"></div>
+
+      <!-- Generating indicator -->
+      <div class="generating-bar" id="generating-bar">
+        <div class="dot-wave"><span></span><span></span><span></span></div>
+        Generating answer, please wait…
+      </div>
+    </div>
+
+  </div>
+
+  <footer>Made with ❤ by Abhay Kumar Tiwari</footer>
+
+</div>
+
+<script>
+  // ── CONFIG: point this to your Render backend URL ──
+  // During local dev: "http://localhost:8000"
+  // After Render deploy: "https://your-app-name.onrender.com"
+  const API_BASE = "http://localhost:8000";
+
+  let currentVideoId = null;
+
+  // ── Auto-resize textarea ──
+  const textarea = document.getElementById("question-input");
+  textarea.addEventListener("input", () => {
+    textarea.style.height = "auto";
+    textarea.style.height = Math.min(textarea.scrollHeight, 160) + "px";
+  });
+
+  // ── Enter to submit (Shift+Enter for newline) ──
+  function handleKey(e) {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      askQuestion();
+    }
+  }
+
+  function showError(id, msg) {
+    const el = document.getElementById(id);
+    el.textContent = msg;
+    el.classList.add("visible");
+  }
+
+  function clearError(id) {
+    const el = document.getElementById(id);
+    el.textContent = "";
+    el.classList.remove("visible");
+  }
+
+  // ── LOAD VIDEO ──
+  async function loadVideo() {
+    const url = document.getElementById("url-input").value.trim();
+    if (!url) { showError("load-error", "Please paste a YouTube URL."); return; }
+
+    clearError("load-error");
+    const btn = document.getElementById("load-btn");
+    btn.disabled = true;
+    btn.textContent = "Loading…";
+
+    // Hide previous session
+    document.getElementById("video-badge").classList.remove("visible");
+    document.getElementById("qa-section").classList.remove("visible");
+    document.getElementById("chat-history").innerHTML = "";
+    currentVideoId = null;
+
+    try {
+      const res = await fetch(`${API_BASE}/load`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url })
+      });
+
+      const data = await res.json();
+
+      if (!res.ok) {
+        showError("load-error", data.detail || "Failed to load video.");
+        return;
+      }
+
+      currentVideoId = data.video_id;
+
+      // Show badge
+      document.getElementById("badge-text").textContent =
+        `Video ready — ID: ${currentVideoId}`;
+      document.getElementById("video-badge").classList.add("visible");
+
+      // Show Q&A section
+      document.getElementById("qa-section").classList.add("visible");
+      document.getElementById("question-input").focus();
+
+    } catch (err) {
+      showError("load-error", "Cannot reach the server. Is the backend running?");
+    } finally {
+      btn.disabled = false;
+      btn.textContent = "Load";
+    }
+  }
+
+  // ── ASK QUESTION ──
+  async function askQuestion() {
+    const question = textarea.value.trim();
+    if (!question) { showError("ask-error", "Please type a question."); return; }
+    if (!currentVideoId) { showError("ask-error", "Load a video first."); return; }
+
+    clearError("ask-error");
+
+    const askBtn = document.getElementById("ask-btn");
+    askBtn.disabled = true;
+
+    // Append question bubble immediately
+    const history = document.getElementById("chat-history");
+    const pair = document.createElement("div");
+    pair.className = "qa-pair";
+    pair.innerHTML = `
+      <div class="q-label">You</div>
+      <div class="q-bubble">${escapeHtml(question)}</div>
+    `;
+    history.appendChild(pair);
+
+    // Clear input
+    textarea.value = "";
+    textarea.style.height = "auto";
+
+    // Show generating bar
+    const genBar = document.getElementById("generating-bar");
+    genBar.classList.add("visible");
+    genBar.scrollIntoView({ behavior: "smooth", block: "nearest" });
+
+    try {
+      const res = await fetch(`${API_BASE}/ask`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ video_id: currentVideoId, question })
+      });
+
+      const data = await res.json();
+      genBar.classList.remove("visible");
+
+      if (!res.ok) {
+        showError("ask-error", data.detail || "Failed to get answer.");
+        return;
+      }
+
+      // Append answer bubble
+      const answerDiv = document.createElement("div");
+      answerDiv.innerHTML = `
+        <div class="a-label">Answer</div>
+        <div class="a-bubble">${escapeHtml(data.answer)}</div>
+      `;
+      pair.appendChild(answerDiv);
+      answerDiv.scrollIntoView({ behavior: "smooth", block: "nearest" });
+
+    } catch (err) {
+      genBar.classList.remove("visible");
+      showError("ask-error", "Cannot reach the server. Is the backend running?");
+    } finally {
+      askBtn.disabled = false;
+      document.getElementById("question-input").focus();
+    }
+  }
+
+  function escapeHtml(str) {
+    return str
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/\n/g, "<br>");
+  }
+</script>
+</body>
+</html>
