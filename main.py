@@ -30,7 +30,8 @@ load_dotenv()
 # CONFIG
 # ─────────────────────────────────────────────
 
-GROQ_API_KEY   = os.getenv("GROQ_API_KEY")
+GROQ_API_KEY      = os.getenv("GROQ_API_KEY")
+WEBSHARE_PROXY_URL = os.getenv("WEBSHARE_PROXY_URL")
 GROQ_MODEL     = "llama-3.1-8b-instant"
 CHUNK_SIZE     = 1000
 CHUNK_OVERLAP  = 200
@@ -95,7 +96,11 @@ def extract_video_id(url_or_id: str) -> str:
 def build_retriever(video_id: str):
     """Fetch transcript (English → Hindi → any available), chunk, embed, return FAISS retriever."""
     try:
-        api = YouTubeTranscriptApi()
+        # Use proxy if available (required on cloud servers like Render)
+        proxies = None
+        if WEBSHARE_PROXY_URL:
+            proxies = {"http": WEBSHARE_PROXY_URL, "https": WEBSHARE_PROXY_URL}
+        api = YouTubeTranscriptApi(proxies=proxies)
 
         # List all available transcripts for this video
         transcript_list = api.list(video_id)
