@@ -9,7 +9,6 @@ Endpoints:
 
 import os
 import re
-import sys
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException
@@ -21,7 +20,6 @@ from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import PromptTemplate
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
-from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_groq import ChatGroq
 from youtube_transcript_api import YouTubeTranscriptApi, TranscriptsDisabled, NoTranscriptFound
 from dotenv import load_dotenv
@@ -32,44 +30,42 @@ load_dotenv()
 # CONFIG
 # ─────────────────────────────────────────────
 
-GROQ_API_KEY    = os.getenv("GROQ_API_KEY")
-GROQ_MODEL      = "llama-3.1-8b-instant"          # Free, fast, great quality
-EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
-CHUNK_SIZE      = 1000
-CHUNK_OVERLAP   = 200
-TOP_K_RESULTS   = 6
+GROQ_API_KEY   = os.getenv("GROQ_API_KEY")
+GROQ_MODEL     = "llama-3.1-8b-instant"
+CHUNK_SIZE     = 1000
+CHUNK_OVERLAP  = 200
+TOP_K_RESULTS  = 6
 
 # In-memory store: video_id → retriever
-# (For production scale, replace with Redis or a persistent store)
 video_store: dict = {}
 
-# Shared embedding model (loaded once at startup)
-embedding_model = None
+# Shared embedding function (lazy-loaded on first /load call)
+_embedding_fn = None
 
-
-# ─────────────────────────────────────────────
-# STARTUP
-# ─────────────────────────────────────────────
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    global embedding_model
-    print("Loading embedding model...")
-    embedding_model = HuggingFaceEmbeddings(model_name=EMBEDDING_MODEL)
-    print("Embedding model ready.")
-    yield
-    print("Shutting down.")
+def get_embedding():
+    """Lazy-load embedding on first use to keep startup RAM low."""
+    global _embedding_fn
+    if _embedding_fn is None:
+        from langchain_huggingface import HuggingFaceEndpointEmbeddings
+        hf_token = os.getenv("HF_TOKEN")
+        if not hf_token:
+            raise HTTPException(status_code=500, detail="HF_TOKEN not set. Add it to your .env file.")
+        _embedding_fn = HuggingFaceEndpointEmbeddings(
+            model="sentence-transformers/all-MiniLM-L6-v2",
+            huggingfacehub_api_token=hf_token,
+        )
+    return _embedding_fn
 
 
 # ─────────────────────────────────────────────
 # APP
 # ─────────────────────────────────────────────
 
-app = FastAPI(title="YouTube RAG API", lifespan=lifespan)
+app = FastAPI(title="ChaTube API")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],      # Tighten this to your Netlify URL in production
+    allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -80,7 +76,7 @@ app.add_middleware(
 # ─────────────────────────────────────────────
 
 def extract_video_id(url_or_id: str) -> str:
-    """Extract video ID from a YouTube URL or return as-is if already an ID."""
+    """Extract video ID from a YouTube URL or return raw ID as-is."""
     patterns = [
         r"(?:v=)([a-zA-Z0-9_-]{11})",
         r"(?:youtu\.be/)([a-zA-Z0-9_-]{11})",
@@ -91,18 +87,31 @@ def extract_video_id(url_or_id: str) -> str:
         match = re.search(pattern, url_or_id)
         if match:
             return match.group(1)
-    # If no pattern matched, assume it's already a raw ID
     if re.match(r"^[a-zA-Z0-9_-]{11}$", url_or_id.strip()):
         return url_or_id.strip()
     raise ValueError(f"Could not extract video ID from: {url_or_id}")
 
 
 def build_retriever(video_id: str):
-    """Fetch transcript, chunk it, embed it, return a FAISS retriever."""
+    """Fetch transcript (English → Hindi → any available), chunk, embed, return FAISS retriever."""
     try:
         api = YouTubeTranscriptApi()
-        transcript_list = api.fetch(video_id)
-        transcript = " ".join(chunk.text for chunk in transcript_list)
+
+        # List all available transcripts for this video
+        transcript_list = api.list(video_id)
+        available = {t.language_code: t for t in transcript_list}
+
+        # Priority: English first, then Hindi, then first available language
+        if "en" in available:
+            fetched = available["en"].fetch()
+        elif "hi" in available:
+            fetched = available["hi"].fetch()
+        else:
+            first = next(iter(available.values()))
+            fetched = first.fetch()
+
+        transcript = " ".join(chunk.text for chunk in fetched)
+
     except TranscriptsDisabled:
         raise HTTPException(status_code=422, detail="Captions are disabled for this video.")
     except NoTranscriptFound:
@@ -116,7 +125,7 @@ def build_retriever(video_id: str):
     )
     chunks = splitter.create_documents([transcript])
 
-    vector_store = FAISS.from_documents(chunks, embedding_model)
+    vector_store = FAISS.from_documents(chunks, get_embedding())
     return vector_store.as_retriever(
         search_type="similarity",
         search_kwargs={"k": TOP_K_RESULTS},
@@ -172,7 +181,7 @@ Answer:""",
 # ─────────────────────────────────────────────
 
 class LoadRequest(BaseModel):
-    url: str                   # Full YouTube URL or raw video ID
+    url: str
 
 class AskRequest(BaseModel):
     video_id: str
@@ -197,10 +206,6 @@ def health():
 
 @app.post("/load", response_model=LoadResponse)
 def load_video(req: LoadRequest):
-    """
-    Accepts a YouTube URL, extracts the video ID, fetches the transcript,
-    builds a FAISS index, and stores the retriever in memory.
-    """
     try:
         video_id = extract_video_id(req.url)
     except ValueError as e:
@@ -218,9 +223,6 @@ def load_video(req: LoadRequest):
 
 @app.post("/ask", response_model=AskResponse)
 def ask_question(req: AskRequest):
-    """
-    Accepts a video_id and a question, runs the RAG chain, returns the answer.
-    """
     if not req.question.strip():
         raise HTTPException(status_code=400, detail="Question cannot be empty.")
 

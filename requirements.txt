@@ -3,12 +3,11 @@ uvicorn[standard]
 langchain
 langchain-core
 langchain-community
-langchain-huggingface
-langchain-text-splitters
 langchain-groq
+langchain-text-splitters
 faiss-cpu
 youtube-transcript-api
-sentence-transformers
 python-dotenv
 pydantic
 requests
+langchain-huggingface
