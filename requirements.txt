@@ -4,10 +4,10 @@ langchain
 langchain-core
 langchain-community
 langchain-groq
+langchain-huggingface
 langchain-text-splitters
 faiss-cpu
-youtube-transcript-api
+yt-dlp
 python-dotenv
 pydantic
 requests
-langchain-huggingface

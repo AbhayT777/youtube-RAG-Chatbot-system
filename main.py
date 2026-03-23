@@ -23,6 +23,8 @@ from langchain_core.prompts import PromptTemplate
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
 from langchain_groq import ChatGroq
+import yt_dlp
+import re as _re
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -156,8 +158,7 @@ Answer:""",
 # ─────────────────────────────────────────────
 
 class IndexRequest(BaseModel):
-    url: str          # YouTube URL (used to extract video_id)
-    transcript: str   # Raw transcript text sent from browser
+    url: str          # YouTube URL
 
 class AskRequest(BaseModel):
     video_id: str
@@ -180,23 +181,90 @@ def health():
     return {"status": "ok"}
 
 
+def fetch_transcript_ytdlp(video_id: str) -> str:
+    """Fetch transcript using yt-dlp — better YouTube bypass than youtube-transcript-api."""
+    url = f"https://www.youtube.com/watch?v={video_id}"
+    
+    ydl_opts = {
+        "skip_download": True,
+        "writeautomaticsub": True,
+        "writesubtitles": True,
+        "subtitleslangs": ["en", "hi"],
+        "subtitlesformat": "json3",
+        "quiet": True,
+        "no_warnings": True,
+    }
+
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+
+            # Try manual subtitles first, then auto-generated
+            subs = info.get("subtitles", {})
+            auto = info.get("automatic_captions", {})
+
+            # Priority: en manual → hi manual → en auto → hi auto → first available
+            track_data = None
+            for lang in ["en", "hi"]:
+                if lang in subs:
+                    track_data = subs[lang]
+                    break
+            if not track_data:
+                for lang in ["en", "hi"]:
+                    if lang in auto:
+                        track_data = auto[lang]
+                        break
+            if not track_data:
+                all_tracks = list(subs.values()) or list(auto.values())
+                if all_tracks:
+                    track_data = all_tracks[0]
+
+            if not track_data:
+                raise HTTPException(status_code=422, detail="No transcript available for this video.")
+
+            # Find json3 format or fallback to first available
+            json3_entry = next((t for t in track_data if t.get("ext") == "json3"), track_data[0])
+            
+            import urllib.request
+            with urllib.request.urlopen(json3_entry["url"]) as resp:
+                import json
+                data = json.loads(resp.read())
+
+            # Extract text from json3 format
+            texts = []
+            for event in data.get("events", []):
+                for seg in event.get("segs", []):
+                    txt = seg.get("utf8", "").strip()
+                    if txt and txt != "\n":
+                        texts.append(txt)
+
+            transcript = " ".join(texts)
+            if not transcript.strip():
+                raise HTTPException(status_code=422, detail="Transcript is empty.")
+            return transcript
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch transcript: {str(e)}")
+
+
 @app.post("/index", response_model=IndexResponse)
 def index_transcript(req: IndexRequest):
     """
-    Receives transcript text fetched by the browser.
-    Builds a FAISS index and stores it in memory.
+    Fetches transcript via yt-dlp and builds FAISS index.
     """
     try:
         video_id = extract_video_id(req.url)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    if not req.transcript.strip():
-        raise HTTPException(status_code=400, detail="Transcript text is empty.")
-
     try:
-        retriever = build_retriever_from_text(req.transcript)
+        transcript = fetch_transcript_ytdlp(video_id)
+        retriever = build_retriever_from_text(transcript)
         video_store[video_id] = retriever
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to index transcript: {str(e)}")
 
