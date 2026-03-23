@@ -2,14 +2,16 @@
 YouTube RAG Q&A — FastAPI Backend
 ----------------------------------
 Endpoints:
-  POST /load   — fetch transcript, build FAISS index for a video
+  POST /index  — accept raw transcript text from browser, build FAISS index
   POST /ask    — answer a question using the loaded index
   GET  /health — health check for Render
+
+NOTE: Transcript is fetched by the browser (user's IP), not the server.
+      This avoids YouTube IP bans on cloud providers like Render.
 """
 
 import os
 import re
-from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -21,7 +23,6 @@ from langchain_core.prompts import PromptTemplate
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
 from langchain_groq import ChatGroq
-from youtube_transcript_api import YouTubeTranscriptApi, TranscriptsDisabled, NoTranscriptFound
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -30,17 +31,17 @@ load_dotenv()
 # CONFIG
 # ─────────────────────────────────────────────
 
-GROQ_API_KEY      = os.getenv("GROQ_API_KEY")
-WEBSHARE_PROXY_URL = os.getenv("WEBSHARE_PROXY_URL")
-GROQ_MODEL     = "llama-3.1-8b-instant"
-CHUNK_SIZE     = 1000
-CHUNK_OVERLAP  = 200
-TOP_K_RESULTS  = 6
+GROQ_API_KEY  = os.getenv("GROQ_API_KEY")
+HF_TOKEN      = os.getenv("HF_TOKEN")
+GROQ_MODEL    = "llama-3.1-8b-instant"
+CHUNK_SIZE    = 1000
+CHUNK_OVERLAP = 200
+TOP_K_RESULTS = 6
 
 # In-memory store: video_id → retriever
 video_store: dict = {}
 
-# Shared embedding function (lazy-loaded on first /load call)
+# Lazy-loaded embedding model
 _embedding_fn = None
 
 def get_embedding():
@@ -48,12 +49,11 @@ def get_embedding():
     global _embedding_fn
     if _embedding_fn is None:
         from langchain_huggingface import HuggingFaceEndpointEmbeddings
-        hf_token = os.getenv("HF_TOKEN")
-        if not hf_token:
-            raise HTTPException(status_code=500, detail="HF_TOKEN not set. Add it to your .env file.")
+        if not HF_TOKEN:
+            raise HTTPException(status_code=500, detail="HF_TOKEN not set on server.")
         _embedding_fn = HuggingFaceEndpointEmbeddings(
             model="sentence-transformers/all-MiniLM-L6-v2",
-            huggingfacehub_api_token=hf_token,
+            huggingfacehub_api_token=HF_TOKEN,
         )
     return _embedding_fn
 
@@ -93,48 +93,13 @@ def extract_video_id(url_or_id: str) -> str:
     raise ValueError(f"Could not extract video ID from: {url_or_id}")
 
 
-def build_retriever(video_id: str):
-    """Fetch transcript (English → Hindi → any available), chunk, embed, return FAISS retriever."""
-    try:
-        # Use proxy if available (required on cloud servers like Render)
-        if WEBSHARE_PROXY_URL:
-            from youtube_transcript_api.proxies import GenericProxyConfig
-            proxy_config = GenericProxyConfig(
-                http_url=WEBSHARE_PROXY_URL,
-                https_url=WEBSHARE_PROXY_URL,
-            )
-            api = YouTubeTranscriptApi(proxy_config=proxy_config)
-        else:
-            api = YouTubeTranscriptApi()
-
-        # List all available transcripts for this video
-        transcript_list = api.list(video_id)
-        available = {t.language_code: t for t in transcript_list}
-
-        # Priority: English first, then Hindi, then first available language
-        if "en" in available:
-            fetched = available["en"].fetch()
-        elif "hi" in available:
-            fetched = available["hi"].fetch()
-        else:
-            first = next(iter(available.values()))
-            fetched = first.fetch()
-
-        transcript = " ".join(chunk.text for chunk in fetched)
-
-    except TranscriptsDisabled:
-        raise HTTPException(status_code=422, detail="Captions are disabled for this video.")
-    except NoTranscriptFound:
-        raise HTTPException(status_code=422, detail="No transcript found for this video.")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to fetch transcript: {str(e)}")
-
+def build_retriever_from_text(transcript: str):
+    """Chunk transcript text, embed it, return FAISS retriever."""
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=CHUNK_SIZE,
         chunk_overlap=CHUNK_OVERLAP,
     )
     chunks = splitter.create_documents([transcript])
-
     vector_store = FAISS.from_documents(chunks, get_embedding())
     return vector_store.as_retriever(
         search_type="similarity",
@@ -190,14 +155,15 @@ Answer:""",
 # SCHEMAS
 # ─────────────────────────────────────────────
 
-class LoadRequest(BaseModel):
-    url: str
+class IndexRequest(BaseModel):
+    url: str          # YouTube URL (used to extract video_id)
+    transcript: str   # Raw transcript text sent from browser
 
 class AskRequest(BaseModel):
     video_id: str
     question: str
 
-class LoadResponse(BaseModel):
+class IndexResponse(BaseModel):
     video_id: str
     message: str
 
@@ -214,25 +180,37 @@ def health():
     return {"status": "ok"}
 
 
-@app.post("/load", response_model=LoadResponse)
-def load_video(req: LoadRequest):
+@app.post("/index", response_model=IndexResponse)
+def index_transcript(req: IndexRequest):
+    """
+    Receives transcript text fetched by the browser.
+    Builds a FAISS index and stores it in memory.
+    """
     try:
         video_id = extract_video_id(req.url)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    if video_id not in video_store:
-        retriever = build_retriever(video_id)
-        video_store[video_id] = retriever
+    if not req.transcript.strip():
+        raise HTTPException(status_code=400, detail="Transcript text is empty.")
 
-    return LoadResponse(
+    try:
+        retriever = build_retriever_from_text(req.transcript)
+        video_store[video_id] = retriever
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to index transcript: {str(e)}")
+
+    return IndexResponse(
         video_id=video_id,
-        message="Transcript loaded and indexed successfully."
+        message="Transcript indexed successfully."
     )
 
 
 @app.post("/ask", response_model=AskResponse)
 def ask_question(req: AskRequest):
+    """
+    Accepts a video_id and question, runs the RAG chain, returns the answer.
+    """
     if not req.question.strip():
         raise HTTPException(status_code=400, detail="Question cannot be empty.")
 
@@ -240,7 +218,7 @@ def ask_question(req: AskRequest):
     if not retriever:
         raise HTTPException(
             status_code=404,
-            detail="Video not loaded. Call /load first."
+            detail="Video not indexed. Load the video first."
         )
 
     chain = build_chain(retriever)
