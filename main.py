@@ -97,10 +97,15 @@ def build_retriever(video_id: str):
     """Fetch transcript (English → Hindi → any available), chunk, embed, return FAISS retriever."""
     try:
         # Use proxy if available (required on cloud servers like Render)
-        proxies = None
         if WEBSHARE_PROXY_URL:
-            proxies = {"http": WEBSHARE_PROXY_URL, "https": WEBSHARE_PROXY_URL}
-        api = YouTubeTranscriptApi(proxies=proxies)
+            from youtube_transcript_api.proxies import GenericProxyConfig
+            proxy_config = GenericProxyConfig(
+                http_url=WEBSHARE_PROXY_URL,
+                https_url=WEBSHARE_PROXY_URL,
+            )
+            api = YouTubeTranscriptApi(proxy_config=proxy_config)
+        else:
+            api = YouTubeTranscriptApi()
 
         # List all available transcripts for this video
         transcript_list = api.list(video_id)
